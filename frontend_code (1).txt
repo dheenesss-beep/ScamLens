@@ -1,0 +1,397 @@
+<title>ScamLens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+/* Layout: hero = live scanner (input left, verdict right), then checks grid, 3-step flow, stack strip */
+:root{
+  --bg:#EEF1F6; --surface:#FFFFFF; --ink:#141A33; --muted:#5A6382; --line:#D5DAE6;
+  --accent:#3B3FD9; --accent-soft:#E3E4FB; --on-accent:#FFFFFF;
+  --danger:#C2283A; --danger-soft:#FBE4E7; --warn:#A35E00; --warn-soft:#FCEFD9; --safe:#1D7A4C; --safe-soft:#DDF3E7;
+  --f-display:"Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body:"Atkinson Hyperlegible", system-ui, -apple-system, sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0E1222; --surface:#171C30; --ink:#E7EAF5; --muted:#9AA2BF; --line:#2A3150;
+  --accent:#8E92FF; --accent-soft:#23275A; --on-accent:#0E1222;
+  --danger:#FF6B7A; --danger-soft:#3A1820; --warn:#F2B04A; --warn-soft:#352612; --safe:#4FCF8E; --safe-soft:#123124; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0E1222; --surface:#171C30; --ink:#E7EAF5; --muted:#9AA2BF; --line:#2A3150;
+  --accent:#8E92FF; --accent-soft:#23275A; --on-accent:#0E1222;
+  --danger:#FF6B7A; --danger-soft:#3A1820; --warn:#F2B04A; --warn-soft:#352612; --safe:#4FCF8E; --safe-soft:#123124; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.55}
+.wrap{max-width:1120px;margin:0 auto;padding-inline:20px}
+h1,h2,h3{font-family:var(--f-display);text-wrap:balance;margin:0;line-height:1.08}
+.mono{font-family:var(--f-mono)}
+a{color:var(--accent)}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:6px}
+
+header.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-block:22px}
+.brand{display:flex;align-items:center;gap:10px;font-family:var(--f-display);font-weight:800;font-size:22px;letter-spacing:-.01em}
+.brand svg{width:30px;height:30px}
+.tag{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:700}
+
+.hero{display:grid;grid-template-columns:1fr;gap:28px;padding-block:24px 56px}
+.hero-copy h1{font-size:clamp(38px,6.4vw,72px);font-weight:800;letter-spacing:-.03em}
+.hero-copy h1 em{font-style:normal;color:var(--accent)}
+.hero-copy p{max-width:58ch;color:var(--muted);font-size:18px;margin:18px 0 0}
+
+.scanner{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);background:var(--surface);border:1px solid var(--line);border-radius:18px;overflow:hidden;box-shadow:0 18px 50px -30px rgba(20,26,51,.45)}
+.pane{padding:22px;min-width:0;display:flex;flex-direction:column;gap:14px}
+.pane+.pane{border-left:1px solid var(--line);background:color-mix(in srgb,var(--bg) 55%,var(--surface))}
+.pane-label{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:700}
+textarea{width:100%;min-height:170px;resize:vertical;border:1px solid var(--line);border-radius:12px;padding:14px;font:15px/1.5 var(--f-body);background:var(--bg);color:var(--ink)}
+textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.btn{font:700 15px var(--f-body);border-radius:10px;padding:11px 18px;border:1px solid transparent;cursor:pointer}
+.btn-primary{background:var(--accent);color:var(--on-accent)}
+.btn-primary:hover{filter:brightness(1.08)}
+.btn-ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:600 13px var(--f-body);padding:6px 11px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.chip.legit::before{content:"✓ ";color:var(--safe)}
+.hint{font-size:13px;color:var(--muted)}
+#qrfile{position:absolute;width:1px;height:1px;opacity:0}
+
+.verdict{display:flex;gap:18px;align-items:center}
+.lens{--p:0;--c:var(--muted);width:104px;height:104px;flex:none;border-radius:50%;display:grid;place-items:center;
+  background:conic-gradient(var(--c) calc(var(--p)*1%),var(--line) 0);transition:--p .6s}
+.lens>div{width:80px;height:80px;border-radius:50%;background:var(--surface);display:grid;place-items:center;text-align:center}
+.lens b{font-family:var(--f-display);font-size:30px;line-height:1;font-variant-numeric:tabular-nums}
+.lens small{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.vtext h3{font-size:26px}
+.vtext p{margin:4px 0 0;color:var(--muted);font-size:15px}
+.flags{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.flag{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.sev{font:700 11px var(--f-mono);letter-spacing:.04em;padding:3px 7px;border-radius:6px;text-transform:uppercase;white-space:nowrap}
+.sev.high{background:var(--danger-soft);color:var(--danger)}
+.sev.med{background:var(--warn-soft);color:var(--warn)}
+.sev.info{background:var(--accent-soft);color:var(--accent)}
+.sev.good{background:var(--safe-soft);color:var(--safe)}
+.flag strong{display:block;font-size:14.5px}
+.flag span.d{font-size:13.5px;color:var(--muted);overflow-wrap:anywhere}
+.links{display:flex;flex-direction:column;gap:6px}
+.link{font:13px var(--f-mono);background:var(--surface);border:1px dashed var(--line);border-radius:8px;padding:8px 10px;overflow-wrap:anywhere}
+.link .host{font-weight:600}
+.advice{border-radius:10px;padding:12px 14px;font-size:14.5px}
+.advice.high{background:var(--danger-soft);color:var(--danger)}
+.advice.med{background:var(--warn-soft);color:var(--warn)}
+.advice.low{background:var(--safe-soft);color:var(--safe)}
+.empty{color:var(--muted);font-size:15px}
+
+section{padding-block:56px}
+.section-head{display:flex;flex-direction:column;gap:8px;margin-bottom:28px;max-width:64ch}
+.section-head h2{font-size:clamp(28px,4vw,42px);letter-spacing:-.02em}
+.section-head p{color:var(--muted);margin:0}
+.checks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.check{background:var(--surface);padding:22px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.check h3{font-size:19px}
+.check p{margin:0;color:var(--muted);font-size:15px}
+.check code{font:13px var(--f-mono);background:var(--bg);border-radius:6px;padding:2px 6px;align-self:flex-start;overflow-wrap:anywhere}
+.flow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;counter-reset:s}
+.step{border-top:3px solid var(--accent);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+.step::before{counter-increment:s;content:"Step " counter(s);font:700 12px var(--f-mono);color:var(--accent);letter-spacing:.06em;text-transform:uppercase}
+.step h3{font-size:21px}
+.step p{margin:0;color:var(--muted)}
+.stack{display:flex;flex-wrap:wrap;gap:10px}
+.stack span{font:600 14px var(--f-mono);border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--surface)}
+footer{padding-block:32px 48px;border-top:1px solid var(--line);color:var(--muted);font-size:14px}
+
+@media (max-width:860px){
+  .scanner{grid-template-columns:1fr}
+  .pane+.pane{border-left:0;border-top:1px solid var(--line)}
+  .checks{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .flow{grid-template-columns:1fr}
+}
+@media (max-width:520px){.checks{grid-template-columns:1fr}.verdict{align-items:flex-start}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="13" cy="13" r="9" fill="none" stroke="var(--accent)" stroke-width="3.2"/><path d="M19.5 19.5 28 28" stroke="var(--ink)" stroke-width="3.6" stroke-linecap="round"/><path d="M9 13.5l3 3 5-6" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      ScamLens
+    </div>
+    <span class="tag">Buildathon demo</span>
+  </header>
+
+  <div class="hero">
+    <div class="hero-copy">
+      <h1>Paste the message.<br><em>See the scam.</em></h1>
+      <p>ScamLens checks suspicious SMS, WhatsApp texts, links, UPI requests and QR codes, then tells you in plain words which red flags it found and what to do next.</p>
+    </div>
+
+    <div class="scanner">
+      <div class="pane">
+        <label class="pane-label" for="msg">Suspicious message or link</label>
+        <textarea id="msg" spellcheck="false" placeholder="Paste an SMS, WhatsApp message or URL here…"></textarea>
+        <div class="row">
+          <button class="btn btn-primary" id="scan" type="button">Scan message</button>
+          <label class="btn btn-ghost" for="qrfile" tabindex="0" id="qrlabel">Upload QR image</label>
+          <input type="file" id="qrfile" accept="image/*">
+        </div>
+        <div class="pane-label">Try a sample</div>
+        <div class="chips" id="samples"></div>
+        <p class="hint">Runs locally through the ScamLens backend. Your input is sent only to the local server.</p>
+      </div>
+      <div class="pane" id="result" aria-live="polite"></div>
+    </div>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <span class="tag">What it checks</span>
+      <h2>Six lenses on every message</h2>
+      <p>Each check is a red flag security teams look for. ScamLens shows which ones fired, so users learn to spot them on their own.</p>
+    </div>
+    <div class="checks">
+      <div class="check"><h3>Lookalike domains</h3><p>Brand names in the wrong domain, or letters swapped to fool the eye.</p><code>paytrn-secure.com</code></div>
+      <div class="check"><h3>Hidden characters</h3><p>Punycode and non-Latin letters that look identical to real ones.</p><code>xn--pple-43d.com</code></div>
+      <div class="check"><h3>Risky link shapes</h3><p>Shorteners, bare IP addresses, throwaway TLDs and plain http.</p><code>http://103.21.4.9/kyc</code></div>
+      <div class="check"><h3>Pressure language</h3><p>Deadlines, threats of blocking or disconnection, "act now" wording.</p><code>blocked today</code></div>
+      <div class="check"><h3>Credential requests</h3><p>Any ask for OTP, UPI PIN, CVV or passwords. Real banks never ask.</p><code>share the OTP</code></div>
+      <div class="check"><h3>UPI traps</h3><p>Collect requests and QR codes dressed up as refunds. A PIN always sends money.</p><code>upi://pay?pa=…</code></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <span class="tag">How it works</span>
+      <h2>Forward it the way you'd ask a friend</h2>
+    </div>
+    <div class="flow">
+      <div class="step"><h3>Forward or paste</h3><p>Share a message, screenshot, link or QR photo to the ScamLens bot or this page.</p></div>
+      <div class="step"><h3>Extract and analyze</h3><p>Links are unwrapped, QR codes decoded, and text scored against known scam patterns.</p></div>
+      <div class="step"><h3>Get a plain verdict</h3><p>A risk score, each red flag explained, and one clear action: ignore, report or block.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <span class="tag">Production roadmap</span>
+      <h2>What the full build adds</h2>
+      <p>This demo uses on-device heuristics. The full version layers live threat intelligence on top.</p>
+    </div>
+    <div class="stack">
+      <span>WHOIS domain age</span><span>Google Safe Browsing</span><span>VirusTotal</span><span>PhishTank</span><span>Redirect unwrapping</span><span>Screenshot OCR</span><span>Sandboxed page preview</span><span>LLM explanation layer</span><span>Telegram / WhatsApp bot</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">ScamLens is a buildathon prototype. Sample messages are fictional. If you've lost money to a scam in India, call 1930 or report at cybercrime.gov.in.</div>
+</footer>
+
+
+<script>
+const SAMPLES = [
+  {label:"Courier hold", text:"India Post: Your parcel is held at our warehouse due to incomplete address. Update within 12 hours or it will be returned: https://indiapost-redelivery.top/track"},
+  {label:"KYC expiry", text:"Dear Customer, your SBI YONO account will be blocked today. Complete KYC immediately: http://sbi-kyc-verify.xyz/login"},
+  {label:"Power cut", text:"Dear consumer, your electricity power will be disconnected tonight at 9:30 pm because previous month bill was not updated. Please contact our electricity officer 9876543210 immediately."},
+  {label:"UPI refund", text:"Your refund of ₹2,499 is ready. Approve the collect request from refund.desk@ybl and enter your UPI PIN to receive the amount."},
+  {label:"Lookalike link", text:"Your Paytm wallet is suspended. Re-verify your account at https://paytrn-secure.com/verify to avoid permanent closure."},
+  {label:"Task job", text:"Part time job! Earn ₹3000-8000 daily from home by liking YouTube videos. Contact HR on WhatsApp: wa.me/919812345678"},
+  {label:"Bank debit alert", legit:true, text:"Rs 450.00 debited from A/c XX1234 on 04-10-26 to VPA swiggy@icici. Not you? Call 18002586161 - HDFC Bank"},
+  {label:"Amazon shipping", legit:true, text:"Your Amazon order #405-1182934 has shipped and arrives Thursday. Track it at https://www.amazon.in/gp/your-account/order-history"}
+];
+
+function esc(s){
+  return String(s).replace(/[&<>\"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+async function analyzeWithBackend(text){
+  const response = await fetch("/api/analyze", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({text})
+  });
+
+  if (!response.ok){
+    let detail = "The ScamLens backend could not analyse the message.";
+    try {
+      const data = await response.json();
+      if (data.error) detail = data.error;
+    } catch(e){}
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+function render(r){
+  const el = document.getElementById("result");
+  const level = r.score >= 60 ? "high" : r.score >= 25 ? "med" : "low";
+  const color = level==="high" ? "var(--danger)" : level==="med" ? "var(--warn)" : "var(--safe)";
+  const head = {high:"High risk",med:"Suspicious",low:"Looks safe"}[level];
+  const sub = {
+    high:"Strong scam signals. Do not click, call or pay.",
+    med:"Some red flags. Verify through the official app or website first.",
+    low:"No major red flags found. Stay alert anyway."
+  }[level];
+
+  const advice = {
+    high:"Don't tap the link or reply. Block the sender and report it through the appropriate official cybercrime channel. If money was lost in India, call 1930.",
+    med:"Open the company's official app or type its website yourself. Never use the link or number in the message.",
+    low:"This looks like a normal message. Still, never share an OTP or PIN with anyone."
+  }[level];
+
+  const sevLabel = {high:"High",med:"Medium",info:"Note",good:"Safe"};
+  const order = {high:0,med:1,info:2,good:3};
+  const flags = [...(r.flags || [])].sort((a,b)=>order[a.sev]-order[b.sev]);
+  const redFlags = flags.filter(f => f.sev !== "good");
+
+  el.innerHTML = `
+    <div class="pane-label">Verdict</div>
+    <div class="verdict">
+      <div class="lens" style="--c:${color};background:conic-gradient(${color} ${r.score}%, var(--line) 0)">
+        <div><span><b>${r.score}</b><small>risk</small></span></div>
+      </div>
+      <div class="vtext"><h3 style="color:${color}">${head}</h3><p>${sub}</p></div>
+    </div>
+
+    ${r.qr ? `<div class="link"><span class="hint">QR decoded:</span> ${esc(r.qr)}</div>` : ""}
+
+    ${flags.length ? `
+      <div class="pane-label">${redFlags.length} red flag${redFlags.length===1?"":"s"} found</div>
+      <ul class="flags">
+        ${flags.map(f => `
+          <li class="flag">
+            <span class="sev ${f.sev}">${sevLabel[f.sev]}</span>
+            <div>
+              <strong>${esc(f.title)}</strong>
+              <span class="d">${esc(f.detail)}</span>
+            </div>
+          </li>
+        `).join("")}
+      </ul>
+    ` : `<p class="empty">No red flags matched.</p>`}
+
+    ${r.links && r.links.length ? `
+      <div class="pane-label">Links found</div>
+      <div class="links">
+        ${r.links.map(l => `
+          <div class="link">
+            <span class="host">${esc(l.host)}</span>${esc(l.path || "")}
+            ${l.official ? " · official" : (l.notes && l.notes.length ? " · " + esc(l.notes.join(", ")) : "")}
+          </div>
+        `).join("")}
+      </div>
+    ` : ""}
+
+    <div class="advice ${level}">${advice}</div>
+  `;
+}
+
+async function runScan(textOverride=null){
+  const msg = document.getElementById("msg");
+  const text = (textOverride !== null ? textOverride : msg.value).trim();
+
+  if (!text){
+    document.getElementById("result").innerHTML =
+      `<div class="pane-label">Verdict</div><p class="empty">Paste a message or link, then press Scan message.</p>`;
+    return;
+  }
+
+  document.getElementById("result").innerHTML =
+    `<div class="pane-label">Verdict</div><p class="empty">Analysing with ScamLens…</p>`;
+
+  try{
+    const result = await analyzeWithBackend(text);
+    render(result);
+  }catch(error){
+    document.getElementById("result").innerHTML =
+      `<div class="pane-label">Error</div><p class="empty">${esc(error.message)}</p>`;
+  }
+}
+
+const chipBox = document.getElementById("samples");
+
+SAMPLES.forEach(s=>{
+  const b = document.createElement("button");
+  b.type="button";
+  b.className="chip" + (s.legit ? " legit" : "");
+  b.textContent=s.label;
+  b.addEventListener("click",()=>{
+    document.getElementById("msg").value = s.text;
+    runScan();
+  });
+  chipBox.appendChild(b);
+});
+
+document.getElementById("scan").addEventListener("click", () => runScan());
+
+document.getElementById("msg").addEventListener("keydown", e=>{
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runScan();
+});
+
+document.getElementById("qrlabel").addEventListener("keydown", e=>{
+  if (e.key==="Enter" || e.key===" "){
+    e.preventDefault();
+    document.getElementById("qrfile").click();
+  }
+});
+
+document.getElementById("qrfile").addEventListener("change", e=>{
+  const f = e.target.files[0];
+  if (!f) return;
+
+  const reader = new FileReader();
+
+  reader.onload = () => {
+    const img = new Image();
+
+    img.onload = async () => {
+      const c = document.createElement("canvas");
+      const scale = Math.min(1, 1200 / Math.max(img.width, img.height));
+
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+
+      const d = ctx.getImageData(0, 0, c.width, c.height);
+      const code = window.jsQR ? jsQR(d.data, c.width, c.height) : null;
+
+      if (!code){
+        document.getElementById("result").innerHTML =
+          `<div class="pane-label">Verdict</div><p class="empty">No QR code found in that image. Try a sharper, closer photo of the code.</p>`;
+        return;
+      }
+
+      document.getElementById("result").innerHTML =
+        `<div class="pane-label">Verdict</div><p class="empty">QR decoded. Analysing…</p>`;
+
+      try{
+        const result = await analyzeWithBackend(code.data);
+        result.qr = code.data;
+        render(result);
+      }catch(error){
+        document.getElementById("result").innerHTML =
+          `<div class="pane-label">Error</div><p class="empty">${esc(error.message)}</p>`;
+      }
+    };
+
+    img.src = reader.result;
+  };
+
+  reader.readAsDataURL(f);
+  e.target.value = "";
+});
+
+// Open in a working state.
+document.getElementById("msg").value = SAMPLES[1].text;
+runScan();
+</script>

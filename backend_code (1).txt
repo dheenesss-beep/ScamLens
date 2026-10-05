@@ -1,0 +1,429 @@
+from flask import Flask, request, jsonify, send_from_directory
+import re
+from urllib.parse import urlparse
+
+app = Flask(__name__, static_folder=".")
+
+BRANDS = {
+    "sbi": ["sbi.co.in", "onlinesbi.sbi"],
+    "hdfc": ["hdfcbank.com"],
+    "icici": ["icicibank.com"],
+    "axis": ["axisbank.com"],
+    "kotak": ["kotak.com"],
+    "paytm": ["paytm.com"],
+    "phonepe": ["phonepe.com"],
+    "gpay": ["pay.google.com"],
+    "amazon": ["amazon.in", "amazon.com"],
+    "flipkart": ["flipkart.com"],
+    "indiapost": ["indiapost.gov.in"],
+    "irctc": ["irctc.co.in"],
+    "incometax": ["incometax.gov.in"],
+    "aadhaar": ["uidai.gov.in"],
+    "uidai": ["uidai.gov.in"],
+    "netflix": ["netflix.com"],
+    "whatsapp": ["whatsapp.com"],
+    "fedex": ["fedex.com"],
+    "bluedart": ["bluedart.com"],
+    "dhl": ["dhl.com"],
+    "google": ["google.com"],
+    "microsoft": ["microsoft.com"],
+    "apple": ["apple.com"],
+    "tneb": ["tnebltd.gov.in"],
+}
+
+SHORTENERS = {
+    "bit.ly", "tinyurl.com", "t.co", "cutt.ly", "rb.gy",
+    "is.gd", "goo.gl", "shorturl.at", "tiny.cc", "ow.ly", "s.id"
+}
+
+RISKY_TLDS = {
+    "xyz", "top", "click", "buzz", "icu", "online", "site",
+    "shop", "rest", "cyou", "vip", "work", "support", "live",
+    "info", "link", "monster", "quest", "sbs"
+}
+
+MULTI_SUFFIX = {
+    "co.in", "gov.in", "org.in", "net.in", "co.uk", "com.au"
+}
+
+
+def registered_domain(host):
+    parts = host.split(".")
+    last_two = ".".join(parts[-2:]) if len(parts) >= 2 else host
+    if last_two in MULTI_SUFFIX and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return last_two
+
+
+def is_official(host):
+    host = host.lower().rstrip(".")
+    for domains in BRANDS.values():
+        for domain in domains:
+            if host == domain or host.endswith("." + domain):
+                return True
+    return False
+
+
+def normalize_lookalike(value):
+    return (
+        value.replace("rn", "m")
+        .replace("vv", "w")
+        .replace("0", "o")
+        .replace("1", "l")
+        .replace("3", "e")
+        .replace("5", "s")
+        .replace("4", "a")
+        .replace("7", "t")
+    )
+
+
+def extract_links(text):
+    # Static URL extraction only. ScamLens does NOT visit the URL.
+    pattern = re.compile(
+        r'\b((?:https?://|www\.)[^\s<>"\']+|'
+        r'(?:[a-z0-9-]+\.)+(?:com|in|net|org|me|ly|co|io|xyz|top|'
+        r'click|buzz|icu|online|site|shop|info|live|link|gl|at|gd|'
+        r'sbi|vip|work|support)(?:/[^\s<>"\']*)?)',
+        re.I
+    )
+
+    results = []
+
+    for match in pattern.finditer(text):
+        raw = re.sub(r"[.,;:!?)]+$", "", match.group(1))
+
+        # Avoid treating an email/UPI address as a URL.
+        before = text[max(0, match.start() - 1):match.start()]
+        if "@" in before:
+            continue
+
+        candidate = raw if re.match(r"^https?://", raw, re.I) else "http://" + raw
+
+        try:
+            parsed = urlparse(candidate)
+            if not parsed.hostname:
+                continue
+
+            results.append({
+                "raw": raw,
+                "parsed": parsed,
+                "host": parsed.hostname.lower().rstrip("."),
+                "explicit_http": bool(re.match(r"^http://", raw, re.I)),
+            })
+        except ValueError:
+            pass
+
+    return results
+
+
+def analyze_link(link, add):
+    host = link["host"]
+    parsed = link["parsed"]
+    reg = registered_domain(host)
+    label = reg.split(".")[0]
+
+    link["notes"] = []
+    link["official"] = False
+
+    if reg == "wa.me":
+        add(
+            "med", 14,
+            "WhatsApp link to a personal number",
+            "Recruiters and companies with real jobs don't hire through random WhatsApp chats."
+        )
+        link["notes"].append("personal WhatsApp")
+        return
+
+    if is_official(host):
+        link["official"] = True
+        add(
+            "good", -15,
+            "Official domain",
+            f"{host} belongs to a domain associated with the brand."
+        )
+        return
+
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+        add(
+            "high", 28,
+            "Link points to a raw IP address",
+            f"{host} has no domain name. Legitimate services almost never use a raw IP as their public login address."
+        )
+        link["notes"].append("IP address")
+
+    if "xn--" in host or any(ord(ch) > 127 for ch in link["raw"]):
+        add(
+            "high", 32,
+            "Disguised characters in the link",
+            "The address uses punycode or non-Latin characters that can be used to imitate a real brand."
+        )
+        link["notes"].append("homoglyph")
+
+    if reg in SHORTENERS:
+        add(
+            "med", 15,
+            "Shortened link hides the destination",
+            f"{reg} masks where the link really goes."
+        )
+        link["notes"].append("shortener")
+
+    tld = host.split(".")[-1]
+    if tld in RISKY_TLDS:
+        add(
+            "med", 16,
+            f"Throwaway domain ending (.{tld})",
+            f"Cheap .{tld} domains are sometimes used by short-lived phishing sites. The TLD alone is not proof of a scam."
+        )
+        link["notes"].append("risky TLD")
+
+    flat_host = re.sub(r"[.-]", "", host)
+    norm_host = normalize_lookalike(flat_host)
+
+    impersonated = None
+    lookalike = False
+
+    for brand in BRANDS:
+        if brand in flat_host:
+            impersonated = brand
+            break
+        if brand in norm_host:
+            impersonated = brand
+            lookalike = True
+            break
+
+    if impersonated and lookalike:
+        add(
+            "high", 38,
+            f'Lookalike of "{impersonated}"',
+            f"{host} appears to swap characters to imitate {impersonated}. The known official domain is {BRANDS[impersonated][0]}."
+        )
+        link["notes"].append("lookalike")
+
+    elif impersonated:
+        add(
+            "high", 35,
+            f"Impersonates {impersonated.upper()}",
+            f"The link contains the brand name, but {reg} is not an official {impersonated} domain ({BRANDS[impersonated][0]})."
+        )
+        link["notes"].append("impersonation")
+
+    bait_pattern = r"(kyc|verify|update|login|secure|refund|reward|claim|unlock|redelivery|bonus)"
+    if re.search(bait_pattern, host + parsed.path, re.I):
+        add(
+            "med", 10,
+            "Bait words in the link",
+            "Words such as verify, login, refund or redelivery in a URL can be a phishing warning sign."
+        )
+        link["notes"].append("bait words")
+
+    if link["explicit_http"]:
+        add(
+            "info", 6,
+            "Unencrypted link (HTTP)",
+            "HTTP does not encrypt the connection like HTTPS. It is a security weakness, but HTTP alone does not prove that a site is a scam."
+        )
+
+    if len(host.split(".")) > 4 or host.count("-") >= 2:
+        add(
+            "med", 8,
+            "Unusually long or hyphenated domain",
+            "An unusually complex domain can be a warning sign, especially when combined with impersonation or urgent requests."
+        )
+
+
+def analyze(text):
+    flags = []
+    score = 0
+    seen = set()
+
+    def add(severity, points, title, detail):
+        nonlocal score
+        if title in seen:
+            return
+        seen.add(title)
+        flags.append({
+            "sev": severity,
+            "title": title,
+            "detail": detail
+        })
+        score += points
+
+    text_lower = text.lower()
+    links = extract_links(text)
+
+    for link in links:
+        analyze_link(link, add)
+
+    safe_negative = re.search(
+        r"(never|do not|don't|dont)\s+(share|disclose|tell)",
+        text,
+        re.I
+    )
+
+    if not safe_negative and re.search(
+        r"\b(otp|cvv|upi pin|atm pin|\bpin\b|password|passcode|verification code)\b",
+        text,
+        re.I
+    ):
+        add(
+            "high", 26,
+            "Asks for a secret code",
+            "OTP, UPI PIN, CVV and passwords are private credentials. An unsolicited message should never ask you to disclose them."
+        )
+
+    collect = re.search(
+        r"collect request|approve the (request|payment)|accept the request",
+        text_lower
+    )
+
+    pin_to_receive = re.search(
+        r"(pin|approve|scan).{0,40}(to )?(receive|get|claim) "
+        r"(the |your )?(amount|money|refund|cashback|payment)",
+        text_lower,
+        re.S
+    )
+
+    if collect or pin_to_receive:
+        add(
+            "high", 34,
+            "UPI request disguised as incoming money",
+            "Approving a collect request or entering a UPI PIN authorizes a payment. You do not need a PIN just to receive money."
+        )
+
+    if re.search(
+        r"\b(blocked|suspended|deactivated|disconnected|expires?|closure|terminated|legal action|penalty)\b",
+        text_lower
+    ):
+        add(
+            "med", 14,
+            "Threat of losing a service",
+            "Messages that threaten blocking, disconnection or legal action can push you to act before checking independently."
+        )
+
+    if re.search(
+        r"\b(immediately|urgent|today|tonight|within \d+ ?"
+        r"(hours?|hrs|minutes?|mins)|last chance|act now|right away)\b",
+        text_lower
+    ):
+        add(
+            "med", 13,
+            "Artificial deadline",
+            "Tight deadlines are a common social-engineering tactic because they discourage independent verification."
+        )
+
+    if re.search(r"\bkyc\b", text_lower):
+        add(
+            "med", 12,
+            "KYC update request",
+            "Treat unsolicited KYC links as suspicious. Verify KYC status through the institution's official app or website."
+        )
+
+    if re.search(
+        r"(electricity|power|bill).{0,80}disconnect|disconnect.{0,80}(electricity|power)",
+        text_lower,
+        re.I | re.S
+    ):
+        add(
+            "high", 22,
+            "Possible fake electricity disconnection",
+            "Urgent disconnection claims combined with a personal number or a suspicious link are common scam patterns."
+        )
+
+    if re.search(
+        r"\b(lottery|you have won|you've won|prize|jackpot|lucky draw|cashback of|gift card)\b",
+        text_lower
+    ):
+        add(
+            "med", 15,
+            "Prize or windfall bait",
+            "Unexpected winnings can be used as a lure for fees, credentials or payment requests."
+        )
+
+    if re.search(
+        r"(part[- ]time|work from home|earn).{0,60}(daily|per day|₹|rs\.?|inr)",
+        text_lower,
+        re.I | re.S
+    ):
+        add(
+            "high", 24,
+            "Too-good income claim",
+            "Easy daily earnings for simple tasks can be a warning sign for task-based or investment scams."
+        )
+
+    if "refund" in text_lower and not any(link["official"] for link in links):
+        add(
+            "info", 6,
+            "Unsolicited refund",
+            "An unexpected refund message can be an opener for a payment or credential scam."
+        )
+
+    if re.search(
+        r"(call|contact|whatsapp|sms).{0,40}(?:\+?91[\s-]?)?[6-9]\d{9}\b|wa\.me/\d+",
+        text_lower,
+        re.I | re.S
+    ):
+        add(
+            "med", 12,
+            "Asks you to contact a personal number",
+            "A random mobile or WhatsApp number is weaker evidence of legitimacy than an independently verified official support channel."
+        )
+
+    if re.match(
+        r"^\s*dear (customer|user|consumer|sir|madam|valued)",
+        text,
+        re.I
+    ):
+        add(
+            "info", 5,
+            "Generic greeting",
+            "A generic greeting is a weak signal by itself, but it can add context when combined with other red flags."
+        )
+
+    score = max(0, min(100, round(score)))
+
+    if flags and all(flag["sev"] == "good" for flag in flags):
+        score = min(score, 6)
+
+    return {
+        "score": score,
+        "flags": flags,
+        "links": [
+            {
+                "host": link["host"],
+                "path": "" if link["parsed"].path == "/" else link["parsed"].path,
+                "official": link["official"],
+                "notes": link["notes"],
+            }
+            for link in links
+        ]
+    }
+
+
+@app.post("/api/analyze")
+def api_analyze():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+
+    if not isinstance(text, str):
+        return jsonify({"error": "The input must be text."}), 400
+
+    text = text.strip()
+
+    if not text:
+        return jsonify({"error": "Please provide a message or URL."}), 400
+
+    if len(text) > 20000:
+        return jsonify({"error": "Input is too long. Please keep it under 20,000 characters."}), 400
+
+    return jsonify(analyze(text))
+
+
+@app.get("/")
+def index():
+    return send_from_directory(".", "frontend.html")
+
+
+if __name__ == "__main__":
+    print("ScamLens is running locally.")
+    print("Open http://127.0.0.1:5000 in your browser.")
+    app.run(host="127.0.0.1", port=5000, debug=True)
